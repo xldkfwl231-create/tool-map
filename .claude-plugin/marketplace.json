@@ -1,0 +1,5 @@
+{
+  "name": "tool-map",
+  "owner": { "name": "xldkfwl231-create" },
+  "plugins": [{ "name": "tool-map", "source": "./" }]
+}

@@ -1,0 +1,6 @@
+{
+  "name": "tool-map",
+  "version": "0.1.0",
+  "description": "스킬과 MCP를 주제별로 묶어 세션 옆에 보여주고, 쓰인 것을 색으로 표시합니다",
+  "types": "./types/index.d.ts"
+}
