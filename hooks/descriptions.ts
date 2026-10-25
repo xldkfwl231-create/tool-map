@@ -168,4 +168,10 @@ export const DESC: Record<string, string> = {
   'm:scheduled-tasks': '예약 작업 관리',
   'm:mcp-registry': '연결할 서비스(커넥터) 찾기',
   'm:1a59c906-04da-521d-bda7-7f71b9f9e01c': 'Claude Docs 문서 만들기·편집',
+  's:industrial-brutalist-ui': '산업 느낌의 거친 화면 스타일',
+  's:minimalist-ui': '깔끔한 흰 바탕 화면 스타일',
+  's:pii-redact': '개인정보 가린 사본 만들기 (명단·신청서)',
+  's:anthropic-skills:schedule': '정해진 시간에 작업 예약',
+  'm:hwp-mcp': '한글(HWP) 파일 읽기·고치기',
+  'm:computer-use': '화면을 보고 마우스·키보드로 조작',
 }
