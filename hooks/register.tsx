@@ -4,6 +4,8 @@ import type { EngineInterface, Register } from 'claude-code'
 import { DESC } from './descriptions'
 
 const PANE = 'tool-map'
+// 묶음마다 왼쪽 색 띠 (어두운 바탕에서 잘 보이는 색)
+const GROUP_COLORS = ['#e879a6', '#60a5fa', '#f59e0b', '#f87171', '#34d399', '#a78bfa', '#94a3b8', '#d97757'] as const
 const used = atom({ plugin: 'tool-map', key: 'used' } as const, {})
 const active = atom({ plugin: 'tool-map', key: 'active' } as const, [])
 const opened = atom({ plugin: 'tool-map', key: 'opened' } as const, [])
@@ -14,6 +16,12 @@ const last = atom({ plugin: 'tool-map', key: 'last' } as const, '')
 const CLAWD = '#d97757'
 const FACE_CALM = '▐▛███▜▌'
 const FACE_WORRIED = '▐▙███▟▌'
+const BODY = '▝▜█████▛▘'
+const LEGS = ['  ▘▘ ▝▝', '  ▝▝ ▘▘'] as const
+
+// 작업 중에는 다리를 번갈아 그려 걷는 것처럼 보이게 한다 (모듈 안의 값이라 다시 불러오면 처음부터)
+let step = 0
+let stopWalk: (() => void) | null = null
 const FORECAST = [
   { upTo: 25, icon: '☀️', word: '맑음' },
   { upTo: 50, icon: '⛅', word: '구름 조금' },
@@ -50,6 +58,19 @@ export function forecastOf(percent: number) {
 
 export function faceOf(index: number) {
   return index >= 3 ? FACE_WORRIED : FACE_CALM
+}
+
+// 머리 옆 표시: 완료 ✨ > 비 ☂ > 폭풍 이상 💦
+export function sideIconOf(index: number, isFinished: boolean) {
+  if (isFinished) return '✨'
+  if (index === 2) return '☂'
+  if (index >= 3) return '💦'
+
+  return ''
+}
+
+export function legsOf(walkStep: number) {
+  return LEGS[walkStep % 2]
 }
 
 export function formatDuration(seconds: number) {
@@ -195,7 +216,9 @@ export const register: Register = on => {
       description: '설치한 스킬·MCP 지도를 세션 옆에 엽니다',
     })
     // On a reload no surface may be attached yet; /tool-map opens it then.
-    $.ui.open({ id: PANE, title: '스킬·MCP 지도' }).catch(() => undefined)
+    if ((await $.session.surfaces()).length > 0) {
+      $.ui.open({ id: PANE, title: '스킬·MCP 지도' }).catch(() => undefined)
+    }
     await takeReading($)
 
     return next(e)
@@ -203,6 +226,12 @@ export const register: Register = on => {
 
   on('prompt.submit', async ($, e, next) => {
     await update($, done, () => null)
+    stopWalk?.()
+    step = 0
+    stopWalk = $.clock.every(600, () => {
+      step += 1
+      $.ui.invalidate('ui.render')
+    })
 
     return next(e)
   }).catch(($, e, next) => next(e))
@@ -211,6 +240,9 @@ export const register: Register = on => {
     const result = await next(e)
     if (e.agentId !== undefined) return result
 
+    stopWalk?.()
+    stopWalk = null
+    step = 0
     await update($, done, () => ({ seconds: Math.round(e.durationMs / 1000), isAborted: e.isAborted }))
     await takeReading($)
 
@@ -248,8 +280,8 @@ export const register: Register = on => {
     }
   }).catch(($, e, next) => next(e))
 
-  // One line above the prompt, shown even while the pane is closed:
-  // Claude's face, the context weather, the skill summary, and the done color.
+  // Above the prompt (design A): a three-row Claude on the left, two rows of
+  // status on the right. Claude walks while working and holds an umbrella in rain.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
 
@@ -263,33 +295,49 @@ export const register: Register = on => {
     const openPane = () => $.ui.open({ id: PANE, title: '스킬·MCP 지도' }).then(() => undefined)
 
     const me = pickColor(await $.session.id())
-    const isFinished = finished !== null && !e.props.isWorking
-    const forecast = percent === null ? null : forecastOf(percent)
+    const isWorking = e.props.isWorking
+    const isFinished = finished !== null && !isWorking
+    const forecast = forecastOf(percent ?? 0)
+    const ink = isFinished ? '#ffffff' : undefined
 
-    const status = e.props.isWorking
-      ? '작업 중…'
-      : isFinished
-        ? `${finished.isAborted ? '⏹ 중단됨' : '✅ 완료'} · ${await folderLabel($)} · ${formatDuration(finished.seconds)}`
-        : null
+    const side = sideIconOf(forecast.index, isFinished)
+    const legs = legsOf(isWorking ? step : 0)
+
+    const weatherLine = percent === null
+      ? '날씨 확인 중'
+      : `${forecast.icon} ${forecast.word}  ·  컨텍스트 ${percent}%`
+    const skillLine = running.length > 0
+      ? `● 실행 중: ${running.map(nameOfKey).join(', ')}`
+      : `스킬·MCP 사용 ${total}${recent !== '' ? ` · 최근 ${nameOfKey(recent)}` : ''}`
+
+    const top = isFinished
+      ? `${finished.isAborted ? '⏹ 멈췄어요' : '✅ 다 했어요!'}  ${formatDuration(finished.seconds)} · ${await folderLabel($)}`
+      : weatherLine
+    const bottom = isFinished
+      ? `${weatherLine}  ·  ${skillLine}`
+      : isWorking
+        ? `● 작업 중…  ·  ${skillLine}`
+        : skillLine
 
     return (
-      <Box backgroundColor={isFinished ? me.color : undefined} paddingX={1} columnGap={1}>
-        {forecast !== null && (
-          <Text color={CLAWD} bold>{faceOf(forecast.index)}</Text>
-        )}
-        {forecast !== null && (
-          <Text color={isFinished ? '#ffffff' : undefined} bold={isFinished}>
-            {forecast.icon} {forecast.word} {percent}%
+      <Box flexDirection="row" columnGap={2} paddingX={1} backgroundColor={isFinished ? me.color : undefined}>
+        <Box flexDirection="column">
+          <Text color={CLAWD} bold>
+            {' '}{faceOf(forecast.index)}{side !== '' ? ` ${side}` : ''}
           </Text>
-        )}
-        <Text wrap="truncate-end">
-          <Text color={isFinished ? '#ffffff' : 'success'} bold> 스킬·MCP ● 사용 {total}</Text>
-          {running.length > 0 && (
-            <Text color={isFinished ? '#ffffff' : 'warning'} bold> · ● 실행 중: {running.map(nameOfKey).join(', ')}</Text>
-          )}
-          {running.length === 0 && recent !== '' && <Text dimColor={!isFinished}> · 최근: {nameOfKey(recent)}</Text>}
-          {status !== null && <Text color={isFinished ? '#ffffff' : undefined} bold={isFinished}> · {status}</Text>}
-        </Text>
+          <Text color={CLAWD} bold>{BODY}</Text>
+          <Text color={CLAWD} bold>{legs}</Text>
+        </Box>
+        <Box flexDirection="column" flexGrow={1}>
+          <Text color={ink} bold wrap="truncate-end">{top}</Text>
+          <Text
+            color={isFinished ? ink : isWorking || running.length > 0 ? 'warning' : undefined}
+            dimColor={!isFinished && !isWorking && running.length === 0}
+            wrap="truncate-end"
+          >
+            {bottom}
+          </Text>
+        </Box>
         <Button key="open-map" label="지도 열기" onPress={openPane} />
       </Box>
     )
@@ -313,15 +361,30 @@ export const register: Register = on => {
       const mcp = item.kind === 'm' ? ' [MCP]' : ''
       const isPicked = picked === key
       const pick = () => update($, selected, now => (now === key ? '' : key))
-      const text = running.has(key) ? (
-        <Text color="warning" bold underline={isPicked}>● {label}{mcp}</Text>
+      // A desktop draws its own button and drops colors inside it, so the
+      // status dot sits outside the button where its color shows everywhere.
+      const isRunning = running.has(key)
+      const dot = isRunning ? (
+        <Text color="warning" bold>●</Text>
       ) : n > 0 ? (
-        <Text color="success" bold underline={isPicked}>● {label}{mcp} ×{n}</Text>
+        <Text color="success" bold>●</Text>
       ) : (
-        <Text dimColor={!isPicked} underline={isPicked}>○ {label}{mcp}</Text>
+        <Text dimColor>○</Text>
       )
 
-      return <Button key={`item-${key}`} onPress={pick}>{text}</Button>
+      return (
+        <Box key={`chip-${key}`} flexDirection="row" columnGap={1}>
+          {dot}
+          <Button
+            key={`item-${key}`}
+            onPress={pick}
+            variant={isRunning || n > 0 ? 'primary' : undefined}
+            dimColor={!isRunning && n === 0 && !isPicked}
+          >
+            {label}{mcp}{n > 0 ? ` ×${n}` : ''}
+          </Button>
+        </Box>
+      )
     }
 
     const note = (shown: Item[]) => {
@@ -352,12 +415,7 @@ export const register: Register = on => {
         <Text dimColor>묶음을 누르면 펼쳐지고, 항목을 누르면 설명이 나옵니다</Text>
         {GROUPS.map(group => {
           const hits = group.items.filter(i => counts[keyOf(i)] || running.has(keyOf(i)))
-          const head = (
-            <Text bold>
-              {group.title} <Text dimColor>({hits.length}/{group.items.length})</Text>
-            </Text>
-          )
-
+          const color = GROUP_COLORS[GROUPS.indexOf(group) % GROUP_COLORS.length]
           // Folded, the group still shows what was used, so the colors stay visible.
           const isOpen = open.has(group.title)
           const shown = isOpen ? group.items : hits
@@ -368,9 +426,15 @@ export const register: Register = on => {
 
           return (
             <Box flexDirection="column">
-              <Button key={`fold-${group.title}`} onPress={toggle}>
-                {isOpen ? '▼' : '▶'} {head}
-              </Button>
+              <Box flexDirection="row" columnGap={1}>
+                <Text color={color} bold>▌</Text>
+                <Button key={`fold-${group.title}`} onPress={toggle}>
+                  {isOpen ? '▼' : '▶'} {group.title}
+                </Button>
+                <Text color={hits.length > 0 ? 'success' : undefined} dimColor={hits.length === 0} bold={hits.length > 0}>
+                  {hits.length}/{group.items.length}
+                </Text>
+              </Box>
               {shown.length > 0 && (
                 <Box flexDirection="row" flexWrap="wrap" columnGap={2}>{shown.map(chip)}</Box>
               )}
