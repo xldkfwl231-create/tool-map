@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { Register } from 'claude-code'
+import type { EngineInterface, Register } from 'claude-code'
 
 import { DESC } from './descriptions'
 
@@ -9,6 +9,68 @@ const active = atom({ plugin: 'tool-map', key: 'active' } as const, [])
 const opened = atom({ plugin: 'tool-map', key: 'opened' } as const, [])
 const selected = atom({ plugin: 'tool-map', key: 'selected' } as const, '')
 const last = atom({ plugin: 'tool-map', key: 'last' } as const, '')
+
+// 입력창 한 줄: 클로드 캐릭터 + 컨텍스트 날씨 + 스킬 요약 + 작업 완료 색
+const CLAWD = '#d97757'
+const FACE_CALM = '▐▛███▜▌'
+const FACE_WORRIED = '▐▙███▟▌'
+const FORECAST = [
+  { upTo: 25, icon: '☀️', word: '맑음' },
+  { upTo: 50, icon: '⛅', word: '구름 조금' },
+  { upTo: 75, icon: '🌧', word: '비' },
+  { upTo: 90, icon: '⛈', word: '폭풍' },
+  { upTo: Infinity, icon: '🌪', word: '요약 임박 · 새 세션 권장' },
+] as const
+const PALETTE = [
+  { name: '짙은 빨강', color: '#8b1a1a' },
+  { name: '짙은 파랑', color: '#1e3a8a' },
+  { name: '짙은 초록', color: '#14532d' },
+  { name: '짙은 보라', color: '#4c1d95' },
+  { name: '짙은 주황', color: '#9a3412' },
+  { name: '짙은 청록', color: '#115e59' },
+  { name: '짙은 자주', color: '#831843' },
+] as const
+const done = atom({ plugin: 'tool-map', key: 'done' } as const, null as DoneState | null)
+const usage = atom({ plugin: 'tool-map', key: 'usage' } as const, null as number | null)
+
+type DoneState = { seconds: number; isAborted: boolean }
+
+export function pickColor(sessionId: string) {
+  let hash = 0
+  for (const ch of sessionId) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0
+
+  return PALETTE[hash % PALETTE.length]
+}
+
+export function forecastOf(percent: number) {
+  const index = FORECAST.findIndex(b => percent < b.upTo)
+
+  return { index, ...FORECAST[index] }
+}
+
+export function faceOf(index: number) {
+  return index >= 3 ? FACE_WORRIED : FACE_CALM
+}
+
+export function formatDuration(seconds: number) {
+  return seconds < 60 ? `${seconds}초` : `${Math.floor(seconds / 60)}분 ${seconds % 60}초`
+}
+
+async function folderLabel($: EngineInterface) {
+  const root = await $.session.root()
+
+  return /scratch-workspaces/i.test(root)
+    ? '폴더 없음'
+    : (root.split(/[\\/]/).filter(Boolean).pop() ?? root)
+}
+
+async function takeReading($: EngineInterface) {
+  const { context } = await $.session.usage()
+  if (!context?.window) return
+
+  const percent = context.percent ?? Math.round(((context.tokens ?? 0) / context.window) * 100)
+  await update($, usage, () => percent)
+}
 
 type Item = { kind: 's' | 'm'; name: string; label?: string }
 type Group = { title: string; items: Item[] }
@@ -134,8 +196,25 @@ export const register: Register = on => {
     })
     // On a reload no surface may be attached yet; /tool-map opens it then.
     $.ui.open({ id: PANE, title: '스킬·MCP 지도' }).catch(() => undefined)
+    await takeReading($)
 
     return next(e)
+  })
+
+  on('prompt.submit', async ($, e, next) => {
+    await update($, done, () => null)
+
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('turn.complete', async ($, e, next) => {
+    const result = await next(e)
+    if (e.agentId !== undefined) return result
+
+    await update($, done, () => ({ seconds: Math.round(e.durationMs / 1000), isAborted: e.isAborted }))
+    await takeReading($)
+
+    return result
   })
 
   on('command.run', { command: 'tool-map' }, async $ => {
@@ -169,27 +248,47 @@ export const register: Register = on => {
     }
   }).catch(($, e, next) => next(e))
 
-  // One line above the prompt, shown even while the pane is closed.
+  // One line above the prompt, shown even while the pane is closed:
+  // Claude's face, the context weather, the skill summary, and the done color.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
 
+    const percent = await read($, usage)
     const { Box, Button, Text } = $.ui.resolve(e)
     const counts = await read($, used)
     const running = [...new Set(await read($, active))]
     const recent = await read($, last)
+    const finished = await read($, done)
     const total = ALL.filter(i => counts[keyOf(i)]).length
     const openPane = () => $.ui.open({ id: PANE, title: '스킬·MCP 지도' }).then(() => undefined)
 
+    const me = pickColor(await $.session.id())
+    const isFinished = finished !== null && !e.props.isWorking
+    const forecast = percent === null ? null : forecastOf(percent)
+
+    const status = e.props.isWorking
+      ? '작업 중…'
+      : isFinished
+        ? `${finished.isAborted ? '⏹ 중단됨' : '✅ 완료'} · ${await folderLabel($)} · ${formatDuration(finished.seconds)}`
+        : null
+
     return (
-      <Box flexDirection="row" columnGap={1}>
+      <Box backgroundColor={isFinished ? me.color : undefined} paddingX={1} columnGap={1}>
+        {forecast !== null && (
+          <Text color={CLAWD} bold>{faceOf(forecast.index)}</Text>
+        )}
+        {forecast !== null && (
+          <Text color={isFinished ? '#ffffff' : undefined} bold={isFinished}>
+            {forecast.icon} {forecast.word} {percent}%
+          </Text>
+        )}
         <Text wrap="truncate-end">
-          <Text bold>스킬·MCP</Text>
-          <Text color="success" bold> ● 사용 {total}</Text>
+          <Text color={isFinished ? '#ffffff' : 'success'} bold> 스킬·MCP ● 사용 {total}</Text>
           {running.length > 0 && (
-            <Text color="warning" bold> · ● 실행 중: {running.map(nameOfKey).join(', ')}</Text>
+            <Text color={isFinished ? '#ffffff' : 'warning'} bold> · ● 실행 중: {running.map(nameOfKey).join(', ')}</Text>
           )}
-          {running.length === 0 && recent !== '' && <Text dimColor> · 최근: {nameOfKey(recent)}</Text>}
-          {total === 0 && running.length === 0 && <Text dimColor> · 아직 쓴 것 없음</Text>}
+          {running.length === 0 && recent !== '' && <Text dimColor={!isFinished}> · 최근: {nameOfKey(recent)}</Text>}
+          {status !== null && <Text color={isFinished ? '#ffffff' : undefined} bold={isFinished}> · {status}</Text>}
         </Text>
         <Button key="open-map" label="지도 열기" onPress={openPane} />
       </Box>

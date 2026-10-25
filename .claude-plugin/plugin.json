@@ -1,6 +1,6 @@
 {
   "name": "tool-map",
   "version": "0.1.0",
-  "description": "스킬과 MCP를 주제별로 묶어 세션 옆에 보여주고, 쓰인 것을 색으로 표시합니다",
+  "description": "입력창 한 줄에 클로드 캐릭터·컨텍스트 날씨·스킬 사용 요약·작업 완료 색을 보여 주고, 스킬·MCP 지도 패널을 연다",
   "types": "./types/index.d.ts"
 }
