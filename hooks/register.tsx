@@ -85,6 +85,77 @@ async function folderLabel($: EngineInterface) {
     : (root.split(/[\\/]/).filter(Boolean).pop() ?? root)
 }
 
+// 요청마다 쓴 토큰과 금액 (금액은 앱이 /cost로 계산하는 값의 차이)
+type TurnCost = {
+  model: string
+  effort: string
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+  usd: number | null
+  limitPct: number | null
+}
+type ModelTotal = { turns: number; tokens: number; usd: number; limitPct: number }
+
+const lastTurn = atom({ plugin: 'tool-map', key: 'lastTurn' } as const, null as TurnCost | null)
+const byModel = atom({ plugin: 'tool-map', key: 'byModel' } as const, {} as Record<string, ModelTotal>)
+
+// 이번 요청이 시작될 때의 값 (모듈 안의 값)
+let currentModel = ''
+let currentEffort: string | number | undefined
+let before: { usd: number | null; limitPct: number | null } = { usd: null, limitPct: null }
+
+const EFFORT_KO: Record<string, string> = {
+  low: '낮음', medium: '중간', high: '높음', xhigh: '매우 높음', max: '최대',
+}
+
+export function effortLabel(effort: string | number | undefined) {
+  if (effort === undefined) return '기본'
+  if (typeof effort === 'number') return `${effort}`
+
+  return EFFORT_KO[effort] ?? effort
+}
+
+export function modelLabel(model: string) {
+  const m = /(opus|sonnet|haiku|fable)-(\d+)-(\d+)/i.exec(model)
+  if (!m) return model
+
+  return `${m[1][0].toUpperCase()}${m[1].slice(1).toLowerCase()} ${m[2]}.${m[3]}`
+}
+
+// 1,234 → 1.2천, 45,678 → 4.6만
+export function tokenLabel(n: number) {
+  if (n < 1000) return `${n}`
+  if (n < 10000) return `${(n / 1000).toFixed(1)}천`
+
+  return `${(n / 10000).toFixed(1)}만`
+}
+
+export function usdLabel(usd: number) {
+  return usd < 0.01 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`
+}
+
+export function turnTokens(t: Pick<TurnCost, 'input' | 'output' | 'cacheRead' | 'cacheWrite'>) {
+  return t.input + t.output + t.cacheRead + t.cacheWrite
+}
+
+// 5시간 한도 1%에 들어간 토큰 (지금까지 기록으로 낸 추정)
+export function tokensPerPercent(totals: Record<string, ModelTotal>) {
+  const all = Object.values(totals)
+  const pct = all.reduce((sum, t) => sum + t.limitPct, 0)
+  if (pct <= 0) return null
+
+  return Math.round(all.reduce((sum, t) => sum + t.tokens, 0) / pct)
+}
+
+async function readMeter($: EngineInterface) {
+  const { rateLimits, cost } = await $.session.usage()
+  const five = rateLimits.find(r => r.kind === 'five_hour')
+
+  return { usd: cost?.usd ?? null, limitPct: five?.percentUsed ?? null }
+}
+
 async function takeReading($: EngineInterface) {
   const { context } = await $.session.usage()
   if (!context?.window) return
@@ -224,8 +295,18 @@ export const register: Register = on => {
     return next(e)
   })
 
+  on('turn.step', async function* ($, e, next) {
+    if (e.agentId === undefined) {
+      currentModel = e.model
+      currentEffort = e.effort
+    }
+
+    return yield* next(e)
+  })
+
   on('prompt.submit', async ($, e, next) => {
     await update($, done, () => null)
+    before = await readMeter($)
     stopWalk?.()
     step = 0
     stopWalk = $.clock.every(600, () => {
@@ -245,6 +326,36 @@ export const register: Register = on => {
     step = 0
     await update($, done, () => ({ seconds: Math.round(e.durationMs / 1000), isAborted: e.isAborted }))
     await takeReading($)
+
+    const after = await readMeter($)
+    const u = e.usage
+    const turn: TurnCost = {
+      model: u?.model ?? currentModel,
+      effort: effortLabel(currentEffort),
+      input: u?.input_tokens ?? 0,
+      output: u?.output_tokens ?? 0,
+      cacheRead: u?.cache_read_input_tokens ?? 0,
+      cacheWrite: u?.cache_creation_input_tokens ?? 0,
+      usd: after.usd !== null && before.usd !== null ? Math.max(0, after.usd - before.usd) : null,
+      limitPct: after.limitPct !== null && before.limitPct !== null
+        ? Math.max(0, after.limitPct - before.limitPct)
+        : null,
+    }
+    await update($, lastTurn, () => turn)
+    const key = `${modelLabel(turn.model)} · 노력 ${turn.effort}`
+    await update($, byModel, all => {
+      const was = all[key] ?? { turns: 0, tokens: 0, usd: 0, limitPct: 0 }
+
+      return {
+        ...all,
+        [key]: {
+          turns: was.turns + 1,
+          tokens: was.tokens + turnTokens(turn),
+          usd: was.usd + (turn.usd ?? 0),
+          limitPct: was.limitPct + (turn.limitPct ?? 0),
+        },
+      }
+    })
 
     return result
   })
@@ -313,6 +424,16 @@ export const register: Register = on => {
     const top = isFinished
       ? `${finished.isAborted ? '⏹ 멈췄어요' : '✅ 다 했어요!'}  ${formatDuration(finished.seconds)} · ${await folderLabel($)}`
       : weatherLine
+    const turn = await read($, lastTurn)
+    const spent = turn === null
+      ? null
+      : [
+          `지난 요청 · ${modelLabel(turn.model)} · 노력 ${turn.effort}`,
+          `입력 ${tokenLabel(turn.input)} · 출력 ${tokenLabel(turn.output)} · 캐시 ${tokenLabel(turn.cacheRead + turn.cacheWrite)}`,
+          turn.usd !== null ? usdLabel(turn.usd) : null,
+          turn.limitPct !== null ? `5시간 한도 +${turn.limitPct}%` : null,
+        ].filter(Boolean).join(' · ')
+
     const bottom = isFinished
       ? `${weatherLine}  ·  ${skillLine}`
       : isWorking
@@ -337,6 +458,11 @@ export const register: Register = on => {
           >
             {bottom}
           </Text>
+          {spent !== null && (
+            <Text color={ink} dimColor={!isFinished} wrap="truncate-end">
+              {spent}
+            </Text>
+          )}
         </Box>
         <Button key="open-map" label="지도 열기" onPress={openPane} />
       </Box>
@@ -349,6 +475,8 @@ export const register: Register = on => {
     const running = new Set(await read($, active))
     const open = new Set(await read($, opened))
     const picked = await read($, selected)
+    const models = await read($, byModel)
+    const perPct = tokensPerPercent(models)
     const total = ALL.filter(i => counts[keyOf(i)]).length
 
     const labelOf = (item: Item) => item.label ?? shortName(item.name)
@@ -412,6 +540,17 @@ export const register: Register = on => {
           <Button key="open-all" onPress={openAll}>모두 펼치기</Button>
           <Button key="close-all" onPress={closeAll}>모두 접기</Button>
         </Box>
+        <Text bold>모델·노력별 사용 (이 세션)</Text>
+        {Object.keys(models).length === 0 && <Text dimColor>아직 기록이 없습니다. 요청을 하나 보내면 채워집니다.</Text>}
+        {Object.entries(models).map(([key, t]) => (
+          <Text key={`model-${key}`}>
+            <Text color="suggestion" bold>{key}</Text>
+            <Text dimColor> · 요청 {t.turns}번 · {tokenLabel(t.tokens)} 토큰 · {usdLabel(t.usd)} · 5시간 한도 {t.limitPct}%</Text>
+          </Text>
+        ))}
+        {perPct !== null && (
+          <Text dimColor>추정: 5시간 한도 1% ≈ {tokenLabel(perPct)} 토큰 (100% ≈ {tokenLabel(perPct * 100)} 토큰, 지금까지 기록 기준)</Text>
+        )}
         <Text dimColor>묶음을 누르면 펼쳐지고, 항목을 누르면 설명이 나옵니다</Text>
         {GROUPS.map(group => {
           const hits = group.items.filter(i => counts[keyOf(i)] || running.has(keyOf(i)))
@@ -428,9 +567,10 @@ export const register: Register = on => {
             <Box flexDirection="column">
               <Box flexDirection="row" columnGap={1}>
                 <Text color={color} bold>▌</Text>
-                <Button key={`fold-${group.title}`} onPress={toggle}>
-                  {isOpen ? '▼' : '▶'} {group.title}
-                </Button>
+                {/* A desktop draws a button in its own colors, so the arrow alone is
+                    the button and the title beside it carries the group's color. */}
+                <Button key={`fold-${group.title}`} label={isOpen ? '▼' : '▶'} onPress={toggle} />
+                <Text color={color} bold>{group.title}</Text>
                 <Text color={hits.length > 0 ? 'success' : undefined} dimColor={hits.length === 0} bold={hits.length > 0}>
                   {hits.length}/{group.items.length}
                 </Text>
