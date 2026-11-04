@@ -21,7 +21,7 @@ const LEGS = ['  ▘▘ ▝▝', '  ▝▝ ▘▘'] as const
 
 // 작업 중에는 다리를 번갈아 그려 걷는 것처럼 보이게 한다 (모듈 안의 값이라 다시 불러오면 처음부터)
 let step = 0
-let stopWalk: (() => void) | null = null
+let walkTimer: { cancel: () => void } | null = null
 const FORECAST = [
   { upTo: 25, icon: '☀️', word: '맑음' },
   { upTo: 50, icon: '⛅', word: '구름 조금' },
@@ -127,9 +127,10 @@ export function modelLabel(model: string) {
 // 1,234 → 1.2천, 45,678 → 4.6만
 export function tokenLabel(n: number) {
   if (n < 1000) return `${n}`
-  if (n < 10000) return `${(n / 1000).toFixed(1)}천`
+  const short = (x: number) => x.toFixed(1).replace(/\.0$/, '')
+  if (n < 10000) return `${short(n / 1000)}천`
 
-  return `${(n / 10000).toFixed(1)}만`
+  return `${short(n / 10000)}만`
 }
 
 export function usdLabel(usd: number) {
@@ -307,9 +308,9 @@ export const register: Register = on => {
   on('prompt.submit', async ($, e, next) => {
     await update($, done, () => null)
     before = await readMeter($)
-    stopWalk?.()
+    walkTimer?.cancel()
     step = 0
-    stopWalk = $.clock.every(600, () => {
+    walkTimer = $.clock.every(600, () => {
       step += 1
       $.ui.invalidate('ui.render')
     })
@@ -321,8 +322,8 @@ export const register: Register = on => {
     const result = await next(e)
     if (e.agentId !== undefined) return result
 
-    stopWalk?.()
-    stopWalk = null
+    walkTimer?.cancel()
+    walkTimer = null
     step = 0
     await update($, done, () => ({ seconds: Math.round(e.durationMs / 1000), isAborted: e.isAborted }))
     await takeReading($)
@@ -410,6 +411,8 @@ export const register: Register = on => {
     const isFinished = finished !== null && !isWorking
     const forecast = forecastOf(percent ?? 0)
     const ink = isFinished ? '#ffffff' : undefined
+    // On a dark done color the usual orange is hard to see: a pale peach instead.
+    const body = isFinished ? '#ffd9cc' : CLAWD
 
     const side = sideIconOf(forecast.index, isFinished)
     const legs = legsOf(isWorking ? step : 0)
@@ -425,13 +428,16 @@ export const register: Register = on => {
       ? `${finished.isAborted ? '⏹ 멈췄어요' : '✅ 다 했어요!'}  ${formatDuration(finished.seconds)} · ${await folderLabel($)}`
       : weatherLine
     const turn = await read($, lastTurn)
+    // Most wanted first, so a narrow window cuts the least useful part.
     const spent = turn === null
       ? null
       : [
-          `지난 요청 · ${modelLabel(turn.model)} · 노력 ${turn.effort}`,
-          `입력 ${tokenLabel(turn.input)} · 출력 ${tokenLabel(turn.output)} · 캐시 ${tokenLabel(turn.cacheRead + turn.cacheWrite)}`,
-          turn.usd !== null ? usdLabel(turn.usd) : null,
-          turn.limitPct !== null ? `5시간 한도 +${turn.limitPct}%` : null,
+          turn.usd !== null ? `💰 ${usdLabel(turn.usd)}` : null,
+          turn.limitPct !== null ? `5시간 +${turn.limitPct}%` : null,
+          `${modelLabel(turn.model)} ${turn.effort}`,
+          `출력 ${tokenLabel(turn.output)}`,
+          `입력 ${tokenLabel(turn.input)}`,
+          `캐시 ${tokenLabel(turn.cacheRead + turn.cacheWrite)}`,
         ].filter(Boolean).join(' · ')
 
     const bottom = isFinished
@@ -442,12 +448,15 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="row" columnGap={2} paddingX={1} backgroundColor={isFinished ? me.color : undefined}>
-        <Box flexDirection="column">
-          <Text color={CLAWD} bold>
-            {' '}{faceOf(forecast.index)}{side !== '' ? ` ${side}` : ''}
-          </Text>
-          <Text color={CLAWD} bold>{BODY}</Text>
-          <Text color={CLAWD} bold>{legs}</Text>
+        <Box flexDirection="column" flexShrink={0}>
+          <Text color={body} bold wrap="truncate">{' '}{faceOf(forecast.index)}</Text>
+          <Text color={body} bold wrap="truncate">{BODY}</Text>
+          <Text color={body} bold wrap="truncate">{legs}</Text>
+        </Box>
+        {/* The sign beside the head sits in a column of its own: an emoji's width
+            is not the same on every surface, and inside the head row it wrapped. */}
+        <Box flexDirection="column" flexShrink={0} width={2}>
+          <Text>{side}</Text>
         </Box>
         <Box flexDirection="column" flexGrow={1}>
           <Text color={ink} bold wrap="truncate-end">{top}</Text>

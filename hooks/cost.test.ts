@@ -17,6 +17,7 @@ test('토큰과 금액 표시', async () => {
   expect(tokenLabel(950)).toBe('950')
   expect(tokenLabel(3400)).toBe('3.4천')
   expect(tokenLabel(45678)).toBe('4.6만')
+  expect(tokenLabel(120000)).toBe('12만')
   expect(usdLabel(0.183)).toBe('$0.18')
   expect(usdLabel(0.0042)).toBe('$0.0042')
 })
