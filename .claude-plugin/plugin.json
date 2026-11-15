@@ -1,6 +1,6 @@
 {
   "name": "tool-map",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "입력창 위 띠에 고양이와 말풍선·날씨·사용량 동그라미 게이지·쓴 스킬과 MCP·작업 완료 색을 우리말로 보여 주고, 스킬·MCP 지도 패널을 연다",
   "types": "./types/index.d.ts"
 }

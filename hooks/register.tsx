@@ -394,10 +394,7 @@ export const register: Register = on => {
       name: 'tool-map',
       description: '설치한 스킬·MCP 지도를 세션 옆에 엽니다',
     })
-    // On a reload no surface may be attached yet; /tool-map opens it then.
-    if ((await $.session.surfaces()).length > 0) {
-      $.ui.open({ id: PANE, title: '스킬·MCP 지도' }).catch(() => undefined)
-    }
+    // The pane no longer opens by itself: the band shows what was used. /tool-map opens it.
     await takeReading($)
     await takeGit($)
     await addToday($, {})
