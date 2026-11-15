@@ -10,7 +10,6 @@ export type TurnCost = {
   usd: number | null
   limitPct: number | null
 }
-export type ModelTotal = { turns: number; tokens: number; usd: number; limitPct: number }
 export type GitState = { branch: string; ahead: number; behind: number }
 export type TodayTotal = { date: string; prompts: number; usd: number }
 
@@ -19,13 +18,10 @@ declare module 'claude-code' {
     'tool-map': {
       used: Usage
       active: string[]
-      opened: string[]
-      selected: string
       last: string
       done: DoneState | null
       usage: number | null
       lastTurn: TurnCost | null
-      byModel: Record<string, ModelTotal>
       prompts: number
       git: GitState | null
       today: TodayTotal | null

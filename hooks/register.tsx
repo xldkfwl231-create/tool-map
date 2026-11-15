@@ -4,15 +4,9 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { GitState, TodayTotal } from '../types'
 import { ageLabel, bandSvg, resetLabel } from './band-svg'
 import type { Chip, Face, Gauge } from './band-svg'
-import { DESC } from './descriptions'
 
-const PANE = 'tool-map'
-// 묶음마다 왼쪽 색 띠 (어두운 바탕에서 잘 보이는 색)
-const GROUP_COLORS = ['#e879a6', '#60a5fa', '#f59e0b', '#f87171', '#34d399', '#a78bfa', '#94a3b8', '#d97757'] as const
 const used = atom({ plugin: 'tool-map', key: 'used' } as const, {})
 const active = atom({ plugin: 'tool-map', key: 'active' } as const, [])
-const opened = atom({ plugin: 'tool-map', key: 'opened' } as const, [])
-const selected = atom({ plugin: 'tool-map', key: 'selected' } as const, '')
 const last = atom({ plugin: 'tool-map', key: 'last' } as const, '')
 
 // 입력창 한 줄: 클로드 캐릭터 + 컨텍스트 날씨 + 스킬 요약 + 작업 완료 색
@@ -106,10 +100,8 @@ type TurnCost = {
   usd: number | null
   limitPct: number | null
 }
-type ModelTotal = { turns: number; tokens: number; usd: number; limitPct: number }
 
 const lastTurn = atom({ plugin: 'tool-map', key: 'lastTurn' } as const, null as TurnCost | null)
-const byModel = atom({ plugin: 'tool-map', key: 'byModel' } as const, {} as Record<string, ModelTotal>)
 
 // 이번 요청이 시작될 때의 값 (모듈 안의 값)
 let currentModel = ''
@@ -147,18 +139,6 @@ export function usdLabel(usd: number) {
   return usd < 0.01 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`
 }
 
-export function turnTokens(t: Pick<TurnCost, 'input' | 'output' | 'cacheRead' | 'cacheWrite'>) {
-  return t.input + t.output + t.cacheRead + t.cacheWrite
-}
-
-// 5시간 한도 1%에 들어간 토큰 (지금까지 기록으로 낸 추정)
-export function tokensPerPercent(totals: Record<string, ModelTotal>) {
-  const all = Object.values(totals)
-  const pct = all.reduce((sum, t) => sum + t.limitPct, 0)
-  if (pct <= 0) return null
-
-  return Math.round(all.reduce((sum, t) => sum + t.tokens, 0) / pct)
-}
 
 async function readMeter($: EngineInterface) {
   const { rateLimits, cost } = await $.session.usage()
@@ -390,11 +370,6 @@ const isPlugin = (name: string, plugin: string) => name.split('@')[0] === plugin
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    await $.command.register({
-      name: 'tool-map',
-      description: '설치한 스킬·MCP 지도를 세션 옆에 엽니다',
-    })
-    // The pane no longer opens by itself: the band shows what was used. /tool-map opens it.
     await takeReading($)
     await takeGit($)
     await addToday($, {})
@@ -462,28 +437,8 @@ export const register: Register = on => {
     }
     await update($, lastTurn, () => turn)
     await addToday($, { usd: turn.usd ?? 0 })
-    const key = `${modelLabel(turn.model)} · 노력 ${turn.effort}`
-    await update($, byModel, all => {
-      const was = all[key] ?? { turns: 0, tokens: 0, usd: 0, limitPct: 0 }
-
-      return {
-        ...all,
-        [key]: {
-          turns: was.turns + 1,
-          tokens: was.tokens + turnTokens(turn),
-          usd: was.usd + (turn.usd ?? 0),
-          limitPct: was.limitPct + (turn.limitPct ?? 0),
-        },
-      }
-    })
 
     return result
-  })
-
-  on('command.run', { command: 'tool-map' }, async $ => {
-    await $.ui.open({ id: PANE, title: '스킬·MCP 지도' })
-
-    return { text: '스킬·MCP 지도를 열었습니다.' }
   })
 
   on('skill.prompt', async ($, e, next) => {
@@ -668,122 +623,5 @@ export const register: Register = on => {
       ...e,
       props: { ...e.props, rows: rows.filter(row => !isPlugin(row.plugin, 'desktop-statusline')) },
     })
-  })
-
-  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Button } = $.ui.resolve(e)
-    const counts = await read($, used)
-    const running = new Set(await read($, active))
-    const open = new Set(await read($, opened))
-    const picked = await read($, selected)
-    const models = await read($, byModel)
-    const perPct = tokensPerPercent(models)
-    const total = ALL.filter(i => counts[keyOf(i)]).length
-
-    const labelOf = (item: Item) => item.label ?? shortName(item.name)
-
-    // Pressing an item shows its line under the group; pressing it again hides it.
-    const chip = (item: Item) => {
-      const key = keyOf(item)
-      const n = counts[key] ?? 0
-      const label = labelOf(item)
-      const mcp = item.kind === 'm' ? ' [MCP]' : ''
-      const isPicked = picked === key
-      const pick = () => update($, selected, now => (now === key ? '' : key))
-      // A desktop draws its own button and drops colors inside it, so the
-      // status dot sits outside the button where its color shows everywhere.
-      const isRunning = running.has(key)
-      const dot = isRunning ? (
-        <Text color="warning" bold>●</Text>
-      ) : n > 0 ? (
-        <Text color="success" bold>●</Text>
-      ) : (
-        <Text dimColor>○</Text>
-      )
-
-      return (
-        <Box key={`chip-${key}`} flexDirection="row" columnGap={1}>
-          {dot}
-          <Button
-            key={`item-${key}`}
-            onPress={pick}
-            variant={isRunning || n > 0 ? 'primary' : undefined}
-            dimColor={!isRunning && n === 0 && !isPicked}
-          >
-            {label}{mcp}{n > 0 ? ` ×${n}` : ''}
-          </Button>
-        </Box>
-      )
-    }
-
-    const note = (shown: Item[]) => {
-      const item = shown.find(i => keyOf(i) === picked)
-      if (!item) return undefined
-
-      return (
-        <Text color="suggestion">
-          ↳ {labelOf(item)}: {DESC[picked] ?? '설명이 아직 없습니다'}
-        </Text>
-      )
-    }
-
-    const titles = GROUPS.map(g => g.title)
-    const openAll = () => update($, opened, () => titles)
-    const closeAll = () => update($, opened, () => [])
-
-    // Every group starts folded so the pane stays short in a small window.
-    return (
-      <Box flexDirection="column">
-        <Text dimColor>
-          <Text color="warning" bold>●</Text> 실행 중  <Text color="success" bold>●</Text> 사용함  ○ 안 씀 · {total}개 사용
-        </Text>
-        <Box flexDirection="row" columnGap={2}>
-          <Button key="open-all" onPress={openAll}>모두 펼치기</Button>
-          <Button key="close-all" onPress={closeAll}>모두 접기</Button>
-        </Box>
-        <Text bold>모델·노력별 사용 (이 세션)</Text>
-        {Object.keys(models).length === 0 && <Text dimColor>아직 기록이 없습니다. 요청을 하나 보내면 채워집니다.</Text>}
-        {Object.entries(models).map(([key, t]) => (
-          <Text key={`model-${key}`}>
-            <Text color="suggestion" bold>{key}</Text>
-            <Text dimColor> · 요청 {t.turns}번 · {tokenLabel(t.tokens)} 토큰 · {usdLabel(t.usd)} · 5시간 한도 {t.limitPct}%</Text>
-          </Text>
-        ))}
-        {perPct !== null && (
-          <Text dimColor>추정: 5시간 한도 1% ≈ {tokenLabel(perPct)} 토큰 (100% ≈ {tokenLabel(perPct * 100)} 토큰, 지금까지 기록 기준)</Text>
-        )}
-        <Text dimColor>묶음을 누르면 펼쳐지고, 항목을 누르면 설명이 나옵니다</Text>
-        {GROUPS.map(group => {
-          const hits = group.items.filter(i => counts[keyOf(i)] || running.has(keyOf(i)))
-          const color = GROUP_COLORS[GROUPS.indexOf(group) % GROUP_COLORS.length]
-          // Folded, the group still shows what was used, so the colors stay visible.
-          const isOpen = open.has(group.title)
-          const shown = isOpen ? group.items : hits
-          const toggle = () =>
-            update($, opened, list =>
-              list.includes(group.title) ? list.filter(t => t !== group.title) : [...list, group.title],
-            )
-
-          return (
-            <Box flexDirection="column">
-              <Box flexDirection="row" columnGap={1}>
-                <Text color={color} bold>▌</Text>
-                {/* A desktop draws a button in its own colors, so the arrow alone is
-                    the button and the title beside it carries the group's color. */}
-                <Button key={`fold-${group.title}`} label={isOpen ? '▼' : '▶'} onPress={toggle} />
-                <Text color={color} bold>{group.title}</Text>
-                <Text color={hits.length > 0 ? 'success' : undefined} dimColor={hits.length === 0} bold={hits.length > 0}>
-                  {hits.length}/{group.items.length}
-                </Text>
-              </Box>
-              {shown.length > 0 && (
-                <Box flexDirection="row" flexWrap="wrap" columnGap={2}>{shown.map(chip)}</Box>
-              )}
-              {note(shown)}
-            </Box>
-          )
-        })}
-      </Box>
-    )
   })
 }
