@@ -1,9 +1,9 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { GitState } from '../types'
+import type { GitState, TodayTotal } from '../types'
 import { ageLabel, bandSvg, resetLabel } from './band-svg'
-import type { Chip, Gauge } from './band-svg'
+import type { Chip, Face, Gauge } from './band-svg'
 import { DESC } from './descriptions'
 
 const PANE = 'tool-map'
@@ -46,6 +46,8 @@ const usage = atom({ plugin: 'tool-map', key: 'usage' } as const, null as number
 // 그림 띠(데스크톱 앱)에만 쓰는 값: 질문 수, 깃 가지
 const prompts = atom({ plugin: 'tool-map', key: 'prompts' } as const, 0)
 const git = atom({ plugin: 'tool-map', key: 'git' } as const, null as GitState | null)
+// 오늘 하루 합계(질문 수 · 쓴 돈): 세션이 바뀌어도 이어지게 $.store 에도 적는다
+const today = atom({ plugin: 'tool-map', key: 'today' } as const, null as TodayTotal | null)
 // 1분마다 다시 그려서 「8분 뒤 새로」 같은 남은 시간이 멈춰 있지 않게 한다
 let minuteTick: { cancel: () => void } | null = null
 
@@ -191,6 +193,65 @@ async function takeGit($: EngineInterface) {
     // 깃이 없거나 못 돌렸으면 가지 칩을 안 그린다
   }
   await update($, git, () => state)
+}
+
+export function dayKey(ms: number) {
+  const d = new Date(ms)
+
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+// 저장해 둔 오늘 합계. 날짜가 바뀌었거나 모양이 이상하면 0부터 센다.
+export function asToday(held: unknown, date: string): TodayTotal {
+  const t = held as Partial<TodayTotal> | null | undefined
+
+  return t && t.date === date && typeof t.prompts === 'number' && typeof t.usd === 'number'
+    ? { date, prompts: t.prompts, usd: t.usd }
+    : { date, prompts: 0, usd: 0 }
+}
+
+export function todayLabel(total: TodayTotal | null, date: string) {
+  if (total === null || total.date !== date || (total.prompts === 0 && total.usd === 0)) return ''
+
+  return [
+    '오늘',
+    total.prompts > 0 ? `질문 ${total.prompts}번` : '',
+    total.usd > 0 ? usdLabel(total.usd) : '',
+  ].filter(part => part !== '').join(' · ')
+}
+
+async function addToday($: EngineInterface, add: { prompts?: number; usd?: number }) {
+  try {
+    const was = asToday(await $.store.get('today'), dayKey(await $.clock.now()))
+    const next = {
+      date: was.date,
+      prompts: was.prompts + (add.prompts ?? 0),
+      usd: Math.round((was.usd + (add.usd ?? 0)) * 10000) / 10000,
+    }
+    // ponytail: 읽고 더해서 쓰는 사이에 다른 세션이 쓰면 그쪽 몫이 빠진다(드묾).
+    // 숫자가 틀어지면 세션마다 따로 적고 보여 줄 때 합치는 방식으로 바꾼다.
+    await $.store.set('today', next)
+    await update($, today, () => next)
+  } catch {
+    // 저장소를 못 쓰면 오늘 합계만 안 나온다
+  }
+}
+
+// 고양이 말풍선: 일하는 중 → 급한 알림(새 세션 · 한도) → 다 했어요 → 평소 한마디
+export function sayLine(s: { isWorking: boolean; doneLine: string; level: number; limitMax: number }) {
+  if (s.isWorking) return '일하는 중이에요…'
+  if (s.level >= 4) return '새 세션을 열어 주세요'
+  if (s.limitMax >= 95) return '한도가 거의 찼어요'
+  if (s.doneLine !== '') return s.doneLine
+
+  return ['넉넉해요', '아직 괜찮아요', '기억이 반쯤 찼어요', '곧 요약돼요'][s.level] ?? '넉넉해요'
+}
+
+// 고양이 표정: 기억이나 한도가 많이 차면 걱정, 잘 끝났으면 웃음
+export function catFace(s: { isHappy: boolean; level: number; limitMax: number }): Face {
+  if (s.level >= 3 || s.limitMax >= 90) return 'worried'
+
+  return s.isHappy ? 'happy' : 'calm'
 }
 
 export function branchLabel(state: GitState | null) {
@@ -339,6 +400,7 @@ export const register: Register = on => {
     }
     await takeReading($)
     await takeGit($)
+    await addToday($, {})
     minuteTick?.cancel()
     minuteTick = $.clock.every(60000, () => $.ui.invalidate('ui.render'))
 
@@ -364,6 +426,7 @@ export const register: Register = on => {
   on('prompt.submit', async ($, e, next) => {
     await update($, done, () => null)
     await update($, prompts, n => n + 1)
+    await addToday($, { prompts: 1 })
     before = await readMeter($)
     walkTimer?.cancel()
     step = 0
@@ -401,6 +464,7 @@ export const register: Register = on => {
         : null,
     }
     await update($, lastTurn, () => turn)
+    await addToday($, { usd: turn.usd ?? 0 })
     const key = `${modelLabel(turn.model)} · 노력 ${turn.effort}`
     await update($, byModel, all => {
       const was = all[key] ?? { turns: 0, tokens: 0, usd: 0, limitPct: 0 }
@@ -491,6 +555,10 @@ export const register: Register = on => {
       const { startedAt, context, rateLimits, cost } = await $.session.usage()
       const now = await $.clock.now()
       const asked = await read($, prompts)
+      const limitMax = Math.max(
+        0,
+        ...rateLimits.filter(r => r.kind === 'five_hour' || r.kind === 'seven_day').map(r => r.percentUsed),
+      )
       const limit = (kind: string, label: string): Gauge => {
         const window = rateLimits.find(r => r.kind === kind)
         if (!window) return { label, percent: null, note: '정보 없음' }
@@ -502,7 +570,7 @@ export const register: Register = on => {
         }
       }
       const band = bandSvg({
-        state: isWorking ? '작업 중…' : isFinished ? doneLine : forecast.index === 4 ? '새 세션 권장' : '',
+        say: sayLine({ isWorking, doneLine: isFinished ? doneLine.replace('  ', ' ') : '', level: forecast.index, limitMax }),
         doneColor: isFinished ? me.color : null,
         folder: await folderLabel($),
         branch: branchLabel(await read($, git)),
@@ -511,8 +579,9 @@ export const register: Register = on => {
           asked > 0 ? `질문 ${asked}번` : '',
           cost ? usdLabel(cost.usd) : '',
         ].filter(part => part !== '').join(' · '),
-        weather: { icon: forecast.icon, word: forecast.word.split(' · ')[0] ?? '', level: forecast.index },
-        side,
+        weather: { icon: forecast.icon, word: forecast.word.split(' · ')[0] ?? '' },
+        face: catFace({ isHappy: isFinished && !finished.isAborted, level: forecast.index, limitMax }),
+        side: side !== '' ? side : limitMax >= 90 ? '💦' : '',
         isWorking,
         step,
         gauges: [
@@ -528,6 +597,7 @@ export const register: Register = on => {
         ],
         chips,
         lastTurn: spent,
+        today: todayLabel(await read($, today), dayKey(now)),
       })
 
       return (

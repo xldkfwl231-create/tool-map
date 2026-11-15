@@ -1,11 +1,12 @@
-// 입력창 위 띠를 그림(SVG) 한 장으로 그린다: 캐릭터 · 동그라미 게이지 세 개 · 쓴 스킬·MCP 칩.
+// 입력창 위 띠를 그림(SVG) 한 장으로 그린다: 고양이와 말풍선 · 동그라미 게이지 세 개 · 쓴 스킬·MCP 칩.
 // 'claude-code' 를 부르지 않는 순수 함수만 있어서 node 로도 돌려 볼 수 있다.
 
 export type Gauge = { label: string; percent: number | null; note: string }
 export type Chip = { label: string; count: number; isRunning: boolean }
+export type Face = 'calm' | 'happy' | 'worried'
 export type BandModel = {
-  /** 맨 앞 칩: '작업 중…' · '✅ 다 했어요! 3분 12초' · 없으면 '' */
-  state: string
+  /** 고양이 말풍선 한마디: '넉넉해요' · '일하는 중이에요…' · '✅ 다 했어요! 3분 12초' */
+  say: string
   /** 작업이 끝났을 때 띠 전체를 칠하는 색 (아니면 null) */
   doneColor: string | null
   folder: string
@@ -13,8 +14,9 @@ export type BandModel = {
   branch: string
   /** '방금 시작 · 질문 1번 · $0.40' */
   session: string
-  weather: { icon: string; word: string; level: number }
-  /** 캐릭터 머리 옆 표시: ✨ ☂ 💦 · 없으면 '' */
+  weather: { icon: string; word: string }
+  face: Face
+  /** 고양이 머리 옆 표시: ✨ ☂ 💦 · 없으면 '' */
   side: string
   isWorking: boolean
   step: number
@@ -22,6 +24,8 @@ export type BandModel = {
   chips: Chip[]
   /** 지난 요청에 쓴 것, 가장 궁금한 것부터 */
   lastTurn: string[]
+  /** '오늘 · 질문 23번 · $12.75' · 없으면 '' */
+  today: string
 }
 
 // ponytail: 그림 너비는 760 고정 — 자리가 좁으면 앱이 통째로 줄여 그린다.
@@ -36,16 +40,17 @@ const FONT = "'Malgun Gothic','Apple SD Gothic Neo','Noto Sans KR',sans-serif"
 // 어두운 화면 기준 색. 칸과 칩은 제 바탕색을 갖고, 바탕 없는 글자는 중간 회색이라
 // 밝은 화면에서도 읽힌다.
 const MUTED = '#8f8d85'
-const EYE = '#3b1d12'
-const CLAWD = '#d97757'
-const CLAWD_ON_DONE = '#ffd9cc'
 const USED_DOT = '#5dcaa5'
 const RUN = { fill: '#633806', ink: '#fac775', dot: '#ef9f27' }
+const BUBBLE = { fill: '#f6f4ec', ink: '#2b2a27' }
 const TILES = [
   { fill: '#72243e', title: '#f4c0d1', note: '#ed93b1', ring: '#d4537e' },
   { fill: '#085041', title: '#9fe1cb', note: '#5dcaa5', ring: '#1d9e75' },
   { fill: '#633806', title: '#fac775', note: '#ef9f27', ring: '#ef9f27' },
 ] as const
+// 치즈 고양이. 작업 완료 색(짙은 바탕) 위에서는 묻히지 않게 밝은 털로 바꾼다.
+const CAT = { fur: '#f0a04b', stripe: '#c56f1f', cream: '#fdebcf', pink: '#f28ba4', eye: '#3b1d12' }
+const CAT_ON_DONE = { fur: '#ffe0b0', stripe: '#f2ab5e', cream: '#ffffff', pink: '#f28ba4', eye: '#3b1d12' }
 
 type Look = { fill: string; ink: string; opacity?: number; dot?: string }
 
@@ -115,19 +120,42 @@ function pill(x: number, y: number, label: string, width: number, look: Look) {
   )
 }
 
-// 캐릭터: 가로 22칸 · 세로 16칸, 한 칸 4px. 일할 때는 다리를 번갈아 접어 걷는다.
-function clawd(x: number, y: number, m: { color: string; isWorried: boolean; isWorking: boolean; step: number }) {
+// 고양이: 가로 22칸 · 세로 16칸, 한 칸 4px. 일할 때는 앞발과 꼬리 끝을 번갈아 움직여 걷는다.
+// 평소 얼굴은 5초에 한 번 눈을 깜빡인다 (그림 안 움직임을 못 그리는 화면에서는 그냥 뜬 눈).
+function cat(x: number, y: number, m: { look: typeof CAT; face: Face; isWorking: boolean; step: number }) {
   const U = 4
-  const r = (cx: number, cy: number, w: number, h: number, fill: string) =>
-    `<rect x="${x + cx * U}" y="${y + cy * U}" width="${w * U}" height="${h * U}" fill="${fill}"/>`
-  const legs = [4, 8, 12, 16].map((lx, i) => r(lx, 11, 2, m.isWorking && (i + m.step) % 2 === 1 ? 2 : 3, m.color))
-  const face = m.isWorried
-    ? [r(6, 5, 1, 1, EYE), r(7, 4, 1, 1, EYE), r(14, 4, 1, 1, EYE), r(15, 5, 1, 1, EYE), r(7, 6, 2, 2, EYE), r(13, 6, 2, 2, EYE), r(10, 9, 2, 1, EYE)]
-    : [r(7, 5, 2, 3, EYE), r(13, 5, 2, 3, EYE)]
+  const c = m.look
+  const at = (cx: number, cy: number, w: number, h: number) =>
+    `x="${x + cx * U}" y="${y + cy * U}" width="${w * U}" height="${h * U}"`
+  const r = (cx: number, cy: number, w: number, h: number, fill: string) => `<rect ${at(cx, cy, w, h)} fill="${fill}"/>`
+  const lid = (cx: number) =>
+    `<rect ${at(cx, 4, 2, 2)} fill="${c.fur}" opacity="0"><animate attributeName="opacity" values="0;0;1;0" keyTimes="0;0.94;0.97;1" dur="5s" repeatCount="indefinite"/></rect>`
+  const isOdd = m.isWorking && m.step % 2 === 1
+  const isEven = m.isWorking && m.step % 2 === 0
+  const paw = (cx: number, isUp: boolean) => r(cx, 13, 2, 1, c.fur) + (isUp ? '' : r(cx, 14, 2, 1, c.cream))
+
+  const eyes = {
+    calm: [r(6, 4, 2, 3, c.eye), r(13, 4, 2, 3, c.eye), lid(6), lid(13)],
+    happy: [r(5, 6, 1, 1, c.eye), r(6, 5, 2, 1, c.eye), r(8, 6, 1, 1, c.eye), r(12, 6, 1, 1, c.eye), r(13, 5, 2, 1, c.eye), r(15, 6, 1, 1, c.eye)],
+    worried: [r(5, 4, 1, 1, c.eye), r(6, 3, 2, 1, c.eye), r(15, 4, 1, 1, c.eye), r(13, 3, 2, 1, c.eye), r(6, 5, 2, 2, c.eye), r(13, 5, 2, 2, c.eye)],
+  }[m.face]
 
   return (
-    `<g shape-rendering="crispEdges">${r(3, 2, 16, 9, m.color)}${r(1, 5, 2, 3, m.color)}${r(19, 5, 2, 3, m.color)}` +
-    `${legs.join('')}${face.join('')}</g>`
+    '<g shape-rendering="crispEdges">' +
+    // 꼬리
+    r(16, 12, 4, 1, c.fur) + r(18, 12, 1, 1, c.stripe) + r(20, 10, 1, 3, c.fur) + r(isOdd ? 20 : 21, 8, 1, 2, c.fur) +
+    // 몸 · 가슴 · 앞발
+    r(5, 10, 11, 4, c.fur) + r(9, 10, 3, 3, c.cream) + paw(6, isOdd) + paw(13, isEven) +
+    // 귀
+    r(3, 0, 2, 1, c.fur) + r(3, 1, 4, 1, c.fur) + r(16, 0, 2, 1, c.fur) + r(14, 1, 4, 1, c.fur) +
+    r(4, 1, 2, 1, c.pink) + r(15, 1, 2, 1, c.pink) +
+    // 머리 · 이마 줄무늬 · 수염
+    r(3, 2, 15, 8, c.fur) + r(8, 2, 1, 2, c.stripe) + r(10, 2, 1, 3, c.stripe) + r(12, 2, 1, 2, c.stripe) +
+    r(1, 6, 2, 1, c.cream) + r(1, 8, 2, 1, c.cream) + r(18, 6, 2, 1, c.cream) + r(18, 8, 2, 1, c.cream) +
+    // 주둥이 · 코 · 입
+    r(8, 7, 5, 2, c.cream) + r(10, 7, 1, 1, c.pink) + r(9, 8, 1, 1, c.eye) + r(11, 8, 1, 1, c.eye) +
+    eyes.join('') +
+    '</g>'
   )
 }
 
@@ -159,7 +187,7 @@ export function bandSvg(m: BandModel) {
   const say = (x: number, y: number, text: string, anchor = 'start') =>
     `<text x="${x}" y="${y}" font-size="${SMALL}" text-anchor="${anchor}" fill="${ink}">${esc(text)}</text>`
 
-  // 맨 윗줄: 상태 칩 · 폴더 · 가지 · 오른쪽 끝에 세션 요약
+  // 맨 윗줄: 고양이 말풍선 · 폴더 · 가지 · 오른쪽 끝에 세션 요약
   let x = PAD
   const headRoom = W - PAD - textWidth(m.session, SMALL) - 12
   // 자리가 모자라면 뒤에 오는 칩(가지 이름)부터 빠진다
@@ -169,18 +197,21 @@ export function bandSvg(m: BandModel) {
     parts.push(pill(x, PAD, label, width, look))
     x += width + 6
   }
-  if (m.state !== '') head(m.state, isDone ? { fill: '#ffffff', opacity: 0.22, ink: '#ffffff' } : RUN)
+  // 말풍선 꼬리는 바로 아래 고양이 머리를 가리킨다
+  const tailY = PAD + CHIP_H - 1
+  parts.push(`<polygon points="${PAD + 30},${tailY} ${PAD + 42},${tailY} ${PAD + 34},${tailY + 8}" fill="${BUBBLE.fill}"/>`)
+  head(m.say, BUBBLE)
   head(`📁 ${clip(m.folder, 18)}`, plain)
   if (m.branch !== '') head(`🌿 ${clip(m.branch, 22)}`, plain)
   parts.push(say(W - PAD, PAD + 17.5, m.session, 'end'))
 
-  // 가운데 줄: 캐릭터 + 날씨, 동그라미 게이지 세 칸
+  // 가운데 줄: 고양이 + 날씨, 동그라미 게이지 세 칸
   const tileY = PAD + CHIP_H + 10
   const tileH = 84
   const face = 92
-  parts.push(clawd(PAD + 2, tileY, {
-    color: isDone ? CLAWD_ON_DONE : CLAWD,
-    isWorried: m.weather.level >= 3,
+  parts.push(cat(PAD + 2, tileY, {
+    look: isDone ? CAT_ON_DONE : CAT,
+    face: m.face,
     isWorking: m.isWorking,
     step: m.step,
   }))
@@ -227,16 +258,22 @@ export function bandSvg(m: BandModel) {
   if (m.chips.length === 0) parts.push(say(x, textY, '아직 쓴 것 없음'))
   else if (shown < m.chips.length) parts.push(say(x, textY, `+${m.chips.length - shown}개`))
 
-  // 맨 아랫줄(있을 때만): 지난 요청에 쓴 것 — 자리가 모자라면 뒤에서부터 뺀다
+  // 맨 아랫줄(있을 때만): 왼쪽에 지난 요청에 쓴 것, 오른쪽 끝에 오늘 합계.
+  // 자리가 모자라면 지난 요청을 뒤에서부터 뺀다.
   let height = rowY + CHIP_H + PAD
-  if (m.lastTurn.length > 0) {
-    let line = '지난 요청  '
-    for (const [i, part] of m.lastTurn.entries()) {
-      const next = `${line}${i > 0 ? ' · ' : ''}${part}`
-      if (textWidth(next, SMALL) > W - PAD * 2) break
-      line = next
+  if (m.lastTurn.length > 0 || m.today !== '') {
+    const y = rowY + CHIP_H + 20
+    const room = W - PAD * 2 - (m.today === '' ? 0 : textWidth(m.today, SMALL) + 16)
+    if (m.today !== '') parts.push(say(W - PAD, y, m.today, 'end'))
+    if (m.lastTurn.length > 0) {
+      let line = '지난 요청  '
+      for (const [i, part] of m.lastTurn.entries()) {
+        const next = `${line}${i > 0 ? ' · ' : ''}${part}`
+        if (textWidth(next, SMALL) > room) break
+        line = next
+      }
+      parts.push(say(PAD, y, line))
     }
-    parts.push(say(PAD, rowY + CHIP_H + 20, line))
     height += 20
   }
 
@@ -248,6 +285,6 @@ export function bandSvg(m: BandModel) {
       `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${height}" viewBox="0 0 ${W} ${height}" font-family="${FONT}">` +
       `${ground}${parts.join('')}</svg>`,
     height,
-    alt: [m.state, figures, m.weather.word, `쓴 스킬·MCP ${m.chips.length}개`].filter(Boolean).join(' · '),
+    alt: [m.say, figures, m.weather.word, `쓴 스킬·MCP ${m.chips.length}개`, m.today].filter(Boolean).join(' · '),
   }
 }

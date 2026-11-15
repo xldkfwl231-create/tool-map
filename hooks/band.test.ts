@@ -2,15 +2,16 @@ import { expect, test } from 'claude-code/testing'
 
 import { ageLabel, bandSvg, fitCount, resetLabel } from './band-svg'
 import type { BandModel } from './band-svg'
-import { branchLabel, usedChips } from './register'
+import { asToday, branchLabel, catFace, dayKey, sayLine, todayLabel, usedChips } from './register'
 
 const MODEL: BandModel = {
-  state: '',
+  say: '넉넉해요',
   doneColor: null,
   folder: '업무도구',
   branch: '메인 ↓137',
   session: '방금 시작 · 질문 1번 · $0.40',
-  weather: { icon: '☀️', word: '맑음', level: 0 },
+  weather: { icon: '☀️', word: '맑음' },
+  face: 'calm',
   side: '',
   isWorking: false,
   step: 0,
@@ -21,6 +22,7 @@ const MODEL: BandModel = {
   ],
   chips: [],
   lastTurn: [],
+  today: '',
 }
 
 test('세션 나이를 우리말로', async () => {
@@ -85,6 +87,41 @@ test('쓴 것 순서: 쓰는 중 → 방금 쓴 것 → 많이 쓴 순', async (
   expect(chips.map(c => c.label)).toEqual(['한글 파일(hwp-mcp)', '웹 검색·수집(firecrawl)', 'Playwright'])
   expect(chips[0]?.isRunning).toBe(true)
   expect(chips[2]?.count).toBe(5)
+})
+
+test('띠 그림: 고양이가 말풍선으로 말하고, 오늘 합계는 맨 아랫줄에', async () => {
+  const band = bandSvg({ ...MODEL, say: '일하는 중이에요…', today: '오늘 · 질문 23번 · $12.75' })
+  expect(band.source.includes('일하는 중이에요…')).toBe(true)
+  expect(band.source.includes('오늘 · 질문 23번 · $12.75')).toBe(true)
+  expect(band.height).toBe(bandSvg(MODEL).height + 20)
+})
+
+test('말풍선 한마디: 일하는 중 → 급한 알림 → 다 했어요 → 평소 한마디', async () => {
+  const idle = { isWorking: false, doneLine: '', level: 0, limitMax: 10 }
+  expect(sayLine(idle)).toBe('넉넉해요')
+  expect(sayLine({ ...idle, level: 3 })).toBe('곧 요약돼요')
+  expect(sayLine({ ...idle, doneLine: '✅ 다 했어요! 1분 33초' })).toBe('✅ 다 했어요! 1분 33초')
+  expect(sayLine({ ...idle, doneLine: '✅ 다 했어요! 1분 33초', limitMax: 96 })).toBe('한도가 거의 찼어요')
+  expect(sayLine({ ...idle, level: 4, limitMax: 96 })).toBe('새 세션을 열어 주세요')
+  expect(sayLine({ ...idle, isWorking: true, level: 4 })).toBe('일하는 중이에요…')
+})
+
+test('고양이 표정: 많이 차면 걱정, 잘 끝났으면 웃음', async () => {
+  expect(catFace({ isHappy: false, level: 0, limitMax: 0 })).toBe('calm')
+  expect(catFace({ isHappy: true, level: 1, limitMax: 50 })).toBe('happy')
+  expect(catFace({ isHappy: true, level: 3, limitMax: 50 })).toBe('worried')
+  expect(catFace({ isHappy: false, level: 0, limitMax: 92 })).toBe('worried')
+})
+
+test('오늘 합계: 날짜가 바뀌면 0부터, 아무것도 없으면 안 보인다', async () => {
+  const day = dayKey(new Date(2026, 10, 15, 12).getTime())
+  expect(day).toBe('2026-11-15')
+  expect(asToday({ date: day, prompts: 3, usd: 1.5 }, day)).toEqual({ date: day, prompts: 3, usd: 1.5 })
+  expect(asToday({ date: '2026-11-14', prompts: 3, usd: 1.5 }, day)).toEqual({ date: day, prompts: 0, usd: 0 })
+  expect(asToday('깨진 값', day)).toEqual({ date: day, prompts: 0, usd: 0 })
+  expect(todayLabel({ date: day, prompts: 23, usd: 12.75 }, day)).toBe('오늘 · 질문 23번 · $12.75')
+  expect(todayLabel({ date: day, prompts: 0, usd: 0 }, day)).toBe('')
+  expect(todayLabel({ date: '2026-11-14', prompts: 5, usd: 1 }, day)).toBe('')
 })
 
 const BAND = {
