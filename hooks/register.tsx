@@ -1,6 +1,9 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
+import type { GitState } from '../types'
+import { ageLabel, bandSvg, resetLabel } from './band-svg'
+import type { Chip, Gauge } from './band-svg'
 import { DESC } from './descriptions'
 
 const PANE = 'tool-map'
@@ -40,6 +43,11 @@ const PALETTE = [
 ] as const
 const done = atom({ plugin: 'tool-map', key: 'done' } as const, null as DoneState | null)
 const usage = atom({ plugin: 'tool-map', key: 'usage' } as const, null as number | null)
+// 그림 띠(데스크톱 앱)에만 쓰는 값: 질문 수, 깃 가지
+const prompts = atom({ plugin: 'tool-map', key: 'prompts' } as const, 0)
+const git = atom({ plugin: 'tool-map', key: 'git' } as const, null as GitState | null)
+// 1분마다 다시 그려서 「8분 뒤 새로」 같은 남은 시간이 멈춰 있지 않게 한다
+let minuteTick: { cancel: () => void } | null = null
 
 type DoneState = { seconds: number; isAborted: boolean }
 
@@ -47,13 +55,13 @@ export function pickColor(sessionId: string) {
   let hash = 0
   for (const ch of sessionId) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0
 
-  return PALETTE[hash % PALETTE.length]
+  return PALETTE[hash % PALETTE.length] ?? PALETTE[0]
 }
 
 export function forecastOf(percent: number) {
   const index = FORECAST.findIndex(b => percent < b.upTo)
 
-  return { index, ...FORECAST[index] }
+  return { index, ...(FORECAST[index] ?? FORECAST[0]) }
 }
 
 export function faceOf(index: number) {
@@ -163,6 +171,32 @@ async function takeReading($: EngineInterface) {
 
   const percent = context.percent ?? Math.round(((context.tokens ?? 0) / context.window) * 100)
   await update($, usage, () => percent)
+}
+
+// 가지 이름과, 원격보다 앞선(↑) · 뒤진(↓) 커밋 수. 깃 폴더가 아니면 null.
+async function takeGit($: EngineInterface) {
+  const run = async (...args: string[]) => {
+    const r = await $.process.run(['git', ...args], { timeoutMs: 5000 })
+
+    return r.exitCode === 0 ? r.stdout.trim() : ''
+  }
+  let state: GitState | null = null
+  try {
+    const branch = await run('symbolic-ref', '--short', '-q', 'HEAD')
+    if (branch !== '') {
+      const [ahead, behind] = (await run('rev-list', '--left-right', '--count', 'HEAD...@{upstream}')).split(/\s+/)
+      state = { branch, ahead: Number(ahead) || 0, behind: Number(behind) || 0 }
+    }
+  } catch {
+    // 깃이 없거나 못 돌렸으면 가지 칩을 안 그린다
+  }
+  await update($, git, () => state)
+}
+
+export function branchLabel(state: GitState | null) {
+  if (state === null) return ''
+
+  return `${state.branch}${state.behind > 0 ? ` ↓${state.behind}` : ''}${state.ahead > 0 ? ` ↑${state.ahead}` : ''}`
 }
 
 type Item = { kind: 's' | 'm'; name: string; label?: string }
@@ -281,6 +315,18 @@ const nameOfKey = (key: string) => {
   return item ? (item.label ?? shortName(item.name)) : key
 }
 
+// 띠에 늘 보이는 「쓴 것」: 쓰는 중 → 방금 쓴 것 → 많이 쓴 순
+export function usedChips(counts: Record<string, number>, running: string[], recent: string): Chip[] {
+  const keys = [...new Set([...running, ...Object.keys(counts).filter(k => (counts[k] ?? 0) > 0)])]
+  const rank = (k: string) => (running.includes(k) ? 0 : k === recent ? 1 : 2)
+
+  return keys
+    .sort((a, b) => rank(a) - rank(b) || (counts[b] ?? 0) - (counts[a] ?? 0))
+    .map(k => ({ label: nameOfKey(k), count: counts[k] ?? 0, isRunning: running.includes(k) }))
+}
+
+const isPlugin = (name: string, plugin: string) => name.split('@')[0] === plugin
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -292,6 +338,16 @@ export const register: Register = on => {
       $.ui.open({ id: PANE, title: '스킬·MCP 지도' }).catch(() => undefined)
     }
     await takeReading($)
+    await takeGit($)
+    minuteTick?.cancel()
+    minuteTick = $.clock.every(60000, () => $.ui.invalidate('ui.render'))
+
+    return next(e)
+  })
+
+  // 사용량이 바뀌면(요청이 끝났을 때 · 한도가 1% 움직였을 때) 동그라미를 다시 그린다
+  on('session.measure', ($, e, next) => {
+    $.ui.invalidate('ui.render')
 
     return next(e)
   })
@@ -307,6 +363,7 @@ export const register: Register = on => {
 
   on('prompt.submit', async ($, e, next) => {
     await update($, done, () => null)
+    await update($, prompts, n => n + 1)
     before = await readMeter($)
     walkTimer?.cancel()
     step = 0
@@ -327,6 +384,7 @@ export const register: Register = on => {
     step = 0
     await update($, done, () => ({ seconds: Math.round(e.durationMs / 1000), isAborted: e.isAborted }))
     await takeReading($)
+    await takeGit($)
 
     const after = await readMeter($)
     const u = e.usage
@@ -392,53 +450,108 @@ export const register: Register = on => {
     }
   }).catch(($, e, next) => next(e))
 
-  // Above the prompt (design A): a three-row Claude on the left, two rows of
-  // status on the right. Claude walks while working and holds an umbrella in rain.
+  // Above the prompt. Where the surface can draw a picture (the desktop app) the
+  // whole band is one Svg: Claude, three ring gauges and the skills in use. On a
+  // terminal it stays a three-row Claude beside rows of text.
+  // Claude walks while working and looks worried when the context fills up.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
 
     const percent = await read($, usage)
-    const { Box, Button, Text } = $.ui.resolve(e)
     const counts = await read($, used)
     const running = [...new Set(await read($, active))]
     const recent = await read($, last)
     const finished = await read($, done)
-    const total = ALL.filter(i => counts[keyOf(i)]).length
-    const openPane = () => $.ui.open({ id: PANE, title: '스킬·MCP 지도' }).then(() => undefined)
+    const chips = usedChips(counts, running, recent)
 
     const me = pickColor(await $.session.id())
     const isWorking = e.props.isWorking
     const isFinished = finished !== null && !isWorking
     const forecast = forecastOf(percent ?? 0)
+    const side = sideIconOf(forecast.index, isFinished)
+    const doneLine = finished === null
+      ? ''
+      : `${finished.isAborted ? '⏹ 멈췄어요' : '✅ 다 했어요!'}  ${formatDuration(finished.seconds)}`
+    const turn = await read($, lastTurn)
+    // Most wanted first, so a narrow window cuts the least useful part.
+    const spent = turn === null
+      ? []
+      : [
+          turn.usd !== null ? `💰 ${usdLabel(turn.usd)}` : '',
+          turn.limitPct !== null ? `5시간 +${turn.limitPct}%` : '',
+          `${modelLabel(turn.model)} ${turn.effort}`,
+          `출력 ${tokenLabel(turn.output)}`,
+          `입력 ${tokenLabel(turn.input)}`,
+          `캐시 ${tokenLabel(turn.cacheRead + turn.cacheWrite)}`,
+        ].filter(part => part !== '')
+
+    // 터미널 말고는(데스크톱 · 모바일 앱) 그림을 그릴 수 있다
+    if (e.surface !== 'terminal') {
+      const { Box, Svg } = $.ui.resolve(e)
+      const { startedAt, context, rateLimits, cost } = await $.session.usage()
+      const now = await $.clock.now()
+      const asked = await read($, prompts)
+      const limit = (kind: string, label: string): Gauge => {
+        const window = rateLimits.find(r => r.kind === kind)
+        if (!window) return { label, percent: null, note: '정보 없음' }
+
+        return {
+          label,
+          percent: Math.round(window.percentUsed),
+          note: window.resetsAt ? resetLabel(Date.parse(window.resetsAt) - now) : '',
+        }
+      }
+      const band = bandSvg({
+        state: isWorking ? '작업 중…' : isFinished ? doneLine : forecast.index === 4 ? '새 세션 권장' : '',
+        doneColor: isFinished ? me.color : null,
+        folder: await folderLabel($),
+        branch: branchLabel(await read($, git)),
+        session: [
+          ageLabel(now - startedAt),
+          asked > 0 ? `질문 ${asked}번` : '',
+          cost ? usdLabel(cost.usd) : '',
+        ].filter(part => part !== '').join(' · '),
+        weather: { icon: forecast.icon, word: forecast.word.split(' · ')[0] ?? '', level: forecast.index },
+        side,
+        isWorking,
+        step,
+        gauges: [
+          {
+            label: '기억',
+            percent: context.percent ?? percent,
+            note: context.tokens === undefined
+              ? '확인 중'
+              : `${tokenLabel(context.tokens)} / ${tokenLabel(context.window)}`,
+          },
+          limit('five_hour', '5시간'),
+          limit('seven_day', '이번 주'),
+        ],
+        chips,
+        lastTurn: spent,
+      })
+
+      return (
+        <Box>
+          <Svg source={band.source} alt={band.alt} />
+        </Box>
+      )
+    }
+
+    const { Box, Text } = $.ui.resolve(e)
     const ink = isFinished ? '#ffffff' : undefined
     // On a dark done color the usual orange is hard to see: a pale peach instead.
     const body = isFinished ? '#ffd9cc' : CLAWD
-
-    const side = sideIconOf(forecast.index, isFinished)
     const legs = legsOf(isWorking ? step : 0)
 
     const weatherLine = percent === null
       ? '날씨 확인 중'
       : `${forecast.icon} ${forecast.word}  ·  컨텍스트 ${percent}%`
+    const usedLine = chips.filter(c => !c.isRunning).map(c => `${c.label} ×${c.count}`).join(', ')
     const skillLine = running.length > 0
       ? `● 실행 중: ${running.map(nameOfKey).join(', ')}`
-      : `스킬·MCP 사용 ${total}${recent !== '' ? ` · 최근 ${nameOfKey(recent)}` : ''}`
+      : `스킬·MCP ${usedLine === '' ? '아직 쓴 것 없음' : usedLine}`
 
-    const top = isFinished
-      ? `${finished.isAborted ? '⏹ 멈췄어요' : '✅ 다 했어요!'}  ${formatDuration(finished.seconds)} · ${await folderLabel($)}`
-      : weatherLine
-    const turn = await read($, lastTurn)
-    // Most wanted first, so a narrow window cuts the least useful part.
-    const spent = turn === null
-      ? null
-      : [
-          turn.usd !== null ? `💰 ${usdLabel(turn.usd)}` : null,
-          turn.limitPct !== null ? `5시간 +${turn.limitPct}%` : null,
-          `${modelLabel(turn.model)} ${turn.effort}`,
-          `출력 ${tokenLabel(turn.output)}`,
-          `입력 ${tokenLabel(turn.input)}`,
-          `캐시 ${tokenLabel(turn.cacheRead + turn.cacheWrite)}`,
-        ].filter(Boolean).join(' · ')
+    const top = isFinished ? `${doneLine} · ${await folderLabel($)}` : weatherLine
 
     const bottom = isFinished
       ? `${weatherLine}  ·  ${skillLine}`
@@ -467,15 +580,27 @@ export const register: Register = on => {
           >
             {bottom}
           </Text>
-          {spent !== null && (
+          {spent.length > 0 && (
             <Text color={ink} dimColor={!isFinished} wrap="truncate-end">
-              {spent}
+              {spent.join(' · ')}
             </Text>
           )}
         </Box>
-        <Button key="open-map" label="지도 열기" onPress={openPane} />
       </Box>
     )
+  })
+
+  // The Desktop Statusline plugin draws the same figures in English. Where this
+  // band is a picture that already shows them, its row is left out of the band.
+  on('ui.render', { component: 'AbovePromptList' }, ($, e, next) => {
+    const rows = e.props.rows
+    const isPicture = e.surface !== 'terminal' && rows.some(row => isPlugin(row.plugin, 'tool-map'))
+    if (!isPicture) return next(e)
+
+    return next({
+      ...e,
+      props: { ...e.props, rows: rows.filter(row => !isPlugin(row.plugin, 'desktop-statusline')) },
+    })
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {

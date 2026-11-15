@@ -11,6 +11,7 @@ export type TurnCost = {
   limitPct: number | null
 }
 export type ModelTotal = { turns: number; tokens: number; usd: number; limitPct: number }
+export type GitState = { branch: string; ahead: number; behind: number }
 
 declare module 'claude-code' {
   interface PluginState {
@@ -24,6 +25,8 @@ declare module 'claude-code' {
       usage: number | null
       lastTurn: TurnCost | null
       byModel: Record<string, ModelTotal>
+      prompts: number
+      git: GitState | null
     }
   }
 }
